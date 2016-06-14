@@ -1,23 +1,27 @@
-
+import scala.annotation.tailrec
 import scala.math._
+import BootstrapAggregator._
 
 trait IntegerDistribution {
   def density(k: Int): Double
 
-  val cdf = __makeCdf(Seq.empty)
+  val cdf = _makeCdf(Vector.empty)
 
   val tolerance: Double = 10e-10
 
-  private def __makeCdf(partialCdf: Seq[Double]): Seq[Double] = {
+  @tailrec
+  private def _makeCdf(partialCdf: Vector[Double]): Vector[Double] =
+
     if (partialCdf.isEmpty)
-      return __makeCdf(Seq(density(0)))
+       _makeCdf(Vector(density(0)))
+    else {
+      val sum = partialCdf.last
+      if (sum >= (1.0 - tolerance))
+        return partialCdf.take(partialCdf.size - 1) :+ 1.0
 
-    val sum = partialCdf.last
-    if (sum >= (1.0 - tolerance))
-      return partialCdf.take(partialCdf.size - 1) :+ 1.0
+      _makeCdf(partialCdf :+ (sum + density(partialCdf.length)))
+    }
 
-    return __makeCdf(partialCdf ++ Seq(sum + density(partialCdf.length)))
-  }
 
   def getValueFromUniform(x: Double): Int = {
     require(x >= 0.0)
@@ -49,21 +53,27 @@ case class PoissonDistribution(lambda: Double) extends IntegerDistribution {
   }
 }
 
-trait Aggregator[A, B, C] {
+trait MonoidAggregator[A, B, C] {
+
+  def zero : B
+
   def prepare(a: A): B
 
   def operation(a1: B, a2: B): B
 
   def present(b: B): C
 
-  def zero: B
+  def compute(in: TraversableOnce[A]): C = {
+    present(reduce(in.map(prepare)))
+  }
 
-  def compute(in: Iterable[A]): C = {
-    present(in.foldLeft[B](zero)((b, a) => operation(b, prepare(a))))
+  def reduce(items: TraversableOnce[B]): B =
+  {
+    items.foldLeft(zero){operation}
   }
 }
 
-case class SumAgg() extends Aggregator[Int, Int, Int] {
+case class SumAgg() extends MonoidAggregator[Int, Int, Int] {
   def zero = 0
 
   def prepare(a: Int) = a
@@ -73,27 +83,32 @@ case class SumAgg() extends Aggregator[Int, Int, Int] {
   def present(b: Int) = b
 }
 
-case class BootstrapResult[C](bootstraps: Seq[(C, Long)])
+case class BootstrapState[B](normalState:B, normalCount:Long, bootstraps: Vector[(B, Long)])
 
-case class Bootstrapper[A, B, C](distribution: IntegerDistribution, bootstrapCount: Int, agg: Aggregator[A, B, C])
-  extends Aggregator[A, Seq[(B, Long)], BootstrapResult[C]] {
+case class BootstrapResult[C](normalResult:C, normalCount:Long, bootstraps: Seq[(C, Long)])
+
+case class Bootstrapper[A, B, C](distribution: IntegerDistribution, bootstrapCount: Int, agg: MonoidAggregator[A, B, C])
+  extends MonoidAggregator[A, BootstrapState[B], BootstrapResult[C]] {
 
   def zero = {
-    var s = Seq[(B, Long)]()
+    var s = Vector[(B, Long)]()
     for (i <- 1 to bootstrapCount) {
       s = s :+(agg.zero, 0L)
     }
-    s
+
+    BootstrapState(agg.zero, 0L, s)
   }
 
+
   def prepare(a: A) = {
-    var s = Seq[(B, Long)]()
+    var s = Vector[(B, Long)]()
+
+    val prepared = agg.prepare(a)
 
     for (i <- 1 to bootstrapCount) {
 
       val k = distribution.getValueFromUniform(scala.util.Random.nextDouble)
       var res = agg.zero
-      val prepared = agg.prepare(a)
 
       for (j <- 1 to k) {
         res = agg.operation(res, prepared)
@@ -102,51 +117,56 @@ case class Bootstrapper[A, B, C](distribution: IntegerDistribution, bootstrapCou
       s = s :+(res, k.toLong)
     }
 
-    s
-
+    BootstrapState(prepared, 1L, s)
   }
 
-  def operation(a1: Seq[(B, Long)], a2: Seq[(B, Long)]): Seq[(B, Long)] = {
-    require(a1.length == a2.length)
+  def operation(a1: BootstrapState[B], a2: BootstrapState[B]): BootstrapState[B] = {
+    require(a1.bootstraps.length == a2.bootstraps.length)
+    require(a1.bootstraps.length == bootstrapCount)
 
-    val zipped = a1 zip a2
-    zipped.map(
+    val zipped = a1.bootstraps zip a2.bootstraps
+    val zippedBoostraps = zipped.map(
       x => (agg.operation(x._1._1, x._2._1), x._1._2 + x._2._2)
     )
+
+    BootstrapState(agg.operation(a1.normalState, a2.normalState), a1.normalCount+a2.normalCount, zippedBoostraps)
   }
 
-  def present(b: Seq[(B, Long)]) = {
-    BootstrapResult[C](b.map(x => (agg.present(x._1), x._2)))
+  def present(b: BootstrapState[B]) = {
+    BootstrapResult[C](agg.present(b.normalState), b.normalCount, b.bootstraps.map(x => (agg.present(x._1), x._2)))
+  }
+}
+
+object BootstrapAggregator {
+
+  implicit def bootstrapMaker[A, B, C](agg: MonoidAggregator[A, B, C]) = new {
+    def withBootstraps(distribution: IntegerDistribution)(bootstrapCount: Int): Bootstrapper[A, B, C] = {
+      Bootstrapper[A, B, C](distribution, bootstrapCount, agg)
+    }
   }
 
 }
 
+
 object o {
-
   def main(a: Array[String]) = {
-    println("a")
+    //println("a")
 
 
-    println(PoissonDistribution(1.0).cdf)
-    println(PoissonDistribution(2.0).cdf)
+   // println(PoissonDistribution(1.0).cdf)
+    //println(PoissonDistribution(2.0).cdf)
 
-    val k = PoissonDistribution(1.0)
 
-    println(k.getValueFromUniform(0.43))
+    val distribution = PoissonDistribution(1.0)
+    val input = Seq(1, 2, 4, 5, 10)
+    val mySumAggregator = SumAgg()
+    val mySumAggregatorWithBootstraps = mySumAggregator.withBootstraps(distribution)(4)
+    val result = mySumAggregatorWithBootstraps.compute(input)
+    println(result)
 
-    println(k.getValueFromUniform(scala.util.Random.nextDouble))
+    println(result.bootstraps.map(x => x._1).sum.toDouble / result.bootstraps.length)
 
-    val s = Seq(1, 2, 4, 5, 10, 10)
 
-    val a = Bootstrapper(k, 1000, SumAgg())
-
-    val b = a.compute(s)
-
-    println(b)
-
-    println(b.bootstraps.map(x => x._1).sum.toDouble / b.bootstraps.length)
-
-    
   }
 
 }
