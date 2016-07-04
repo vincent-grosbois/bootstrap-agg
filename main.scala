@@ -1,6 +1,5 @@
 import scala.annotation.tailrec
 import scala.math._
-import BootstrapAggregator._
 
 trait IntegerDistribution {
   def density(k: Int): Double
@@ -13,7 +12,7 @@ trait IntegerDistribution {
   private def _makeCdf(partialCdf: Vector[Double]): Vector[Double] =
 
     if (partialCdf.isEmpty)
-       _makeCdf(Vector(density(0)))
+      _makeCdf(Vector(density(0)))
     else {
       val sum = partialCdf.last
       if (sum >= (1.0 - tolerance))
@@ -137,6 +136,34 @@ case class Bootstrapper[A, B, C](distribution: IntegerDistribution, bootstrapCou
   }
 }
 
+case class InnerKey[A, B, C, K](makeKey: A=>K, agg: MonoidAggregator[A, B, C])
+  extends MonoidAggregator[A, Map[K,B], Map[K,C]] {
+
+  def zero = Map.empty
+
+  def prepare(a: A) = Map(makeKey(a) -> agg.prepare(a))
+
+  def operation(b1: Map[K, B], b2: Map[K, B]): Map[K, B] = {
+
+    val keys = b1.keySet ++ b2.keySet
+
+    val keyValSeq =
+      for {
+        key <- keys
+        aggValue =
+        (b1.get(key), b2.get(key)) match {
+          case (Some(x), Some(y)) => agg.operation(x, y)
+          case (Some(x), None) => x
+          case (None, Some(y)) => y
+        }
+      } yield key -> aggValue
+
+    keyValSeq.toMap
+  }
+
+  def present(b:Map[K,B]) = b.mapValues(agg.present)
+}
+
 object BootstrapAggregator {
 
   implicit def bootstrapMaker[A, B, C](agg: MonoidAggregator[A, B, C]) = new {
@@ -147,25 +174,43 @@ object BootstrapAggregator {
 
 }
 
+object InnerKeyAggregator {
+  implicit def maker[A, B, C, K](agg: MonoidAggregator[A, B, C]) = new {
+    def withInnerKey(makeKey: A => K): InnerKey[A, B, C, K] = {
+      InnerKey[A, B, C, K](makeKey, agg)
+    }
+  }
+}
+
 
 object o {
   def main(a: Array[String]) = {
     //println("a")
 
 
-   // println(PoissonDistribution(1.0).cdf)
+    // println(PoissonDistribution(1.0).cdf)
     //println(PoissonDistribution(2.0).cdf)
 
 
-    val distribution = PoissonDistribution(1.0)
-    val input = Seq(1, 2, 4, 5, 10)
+    /* val distribution = PoissonDistribution(1.0)
+     val input = Seq(1, 2, 4, 5, 10)
+     val mySumAggregator = SumAgg()
+     val mySumAggregatorWithBootstraps = mySumAggregator.withBootstraps(distribution)(4)
+     val result = mySumAggregatorWithBootstraps.compute(input)
+     println(result)
+
+     println(result.bootstraps.map(x => x._1).sum.toDouble / result.bootstraps.length)
+ */
+
+
+    import InnerKeyAggregator._
+
+    val input = Seq(1, 1, 2, 2, 4, 5, 4)
     val mySumAggregator = SumAgg()
-    val mySumAggregatorWithBootstraps = mySumAggregator.withBootstraps(distribution)(4)
-    val result = mySumAggregatorWithBootstraps.compute(input)
-    println(result)
 
-    println(result.bootstraps.map(x => x._1).sum.toDouble / result.bootstraps.length)
+    val mySumAggregatorWithInner = mySumAggregator.withInnerKey(_.hashCode)
 
+    println(mySumAggregatorWithInner.compute(input))
 
   }
 
